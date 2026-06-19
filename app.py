@@ -1,19 +1,24 @@
 """
 Mini Project — Conversational Analytics
 Use Case C · Aset & Gangguan
-Chatbot text-to-SQL: pertanyaan natural -> SQL -> PostgreSQL -> jawaban + grafik.
+Chatbot text-to-SQL: pertanyaan natural -> SQL -> database -> jawaban + grafik.
+
+Database: SQLite in-memory, dibangun otomatis dari assets.csv & outages.csv
+setiap kali app start (tidak butuh server database eksternal).
 
 Jalankan lokal:  streamlit run app.py
-Deploy: Streamlit Community Cloud (isi GEMINI_API_KEY & DB_URL di Secrets)
+Deploy: Streamlit Community Cloud (isi GEMINI_API_KEY di Secrets)
 """
 import os
 import re
+import glob
 import pandas as pd
 import streamlit as st
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 
 st.set_page_config(page_title='Conversational Analytics — Aset & Gangguan',
                     page_icon='⚡', layout='centered')
@@ -22,16 +27,11 @@ st.set_page_config(page_title='Conversational Analytics — Aset & Gangguan',
 # Di Colab: GEMINI_API_KEY diisi manual di variabel.
 # Di Streamlit Cloud: isi lewat menu Settings -> Secrets, format:
 #   GEMINI_API_KEY = "isi_key_disini"
-#   DB_URL = "postgresql://user:password@host:5432/namadb"
 GEMINI_API_KEY = st.secrets.get('GEMINI_API_KEY', os.environ.get('GEMINI_API_KEY', ''))
-DB_URL = st.secrets.get('DB_URL', os.environ.get('DB_URL', ''))
 MODEL_NAME = 'gemini-2.5-flash'
 
 if not GEMINI_API_KEY:
     st.error('GEMINI_API_KEY belum diisi. Tambahkan di Streamlit Secrets.')
-    st.stop()
-if not DB_URL:
-    st.error('DB_URL belum diisi. Tambahkan di Streamlit Secrets.')
     st.stop()
 
 
@@ -42,47 +42,71 @@ def panggil_gemini(prompt: str) -> str:
     return resp.text
 
 
-# ── Database ───────────────────────────────────────────────────────
+# ── Database: SQLite in-memory, dibangun dari CSV ───────────────────
+def _cari_csv(nama_file: str) -> str:
+    """Cari assets.csv / outages.csv di folder app maupun subfolder."""
+    kandidat = [nama_file, os.path.join('data', nama_file)]
+    for k in kandidat:
+        if os.path.exists(k):
+            return k
+    hits = glob.glob(f'**/{nama_file}', recursive=True)
+    if hits:
+        return hits[0]
+    raise FileNotFoundError(
+        f"{nama_file} tidak ditemukan. Pastikan file ada di root repo atau folder data/."
+    )
+
+
 @st.cache_resource
 def get_engine():
-    return create_engine(DB_URL, pool_pre_ping=True)
+    eng = create_engine('sqlite://', connect_args={'check_same_thread': False},
+                         poolclass=StaticPool)
+
+    assets = pd.read_csv(_cari_csv('assets.csv'))
+    outages = pd.read_csv(_cari_csv('outages.csv'), parse_dates=['mulai', 'selesai'])
+
+    assets.to_sql('assets', eng, if_exists='replace', index=False)
+    outages.to_sql('outages', eng, if_exists='replace', index=False)
+    return eng
 
 
 engine = get_engine()
 
-# === [DISEDIAKAN] Skema sebagai teks untuk di-inject ke prompt ===
+# === Skema sebagai teks untuk di-inject ke prompt ===
 SCHEMA_STR = """assets(asset_id, nama, jenis, lokasi)
 outages(outage_id, asset_id, mulai, selesai, durasi_menit, penyebab)
 
 Relasi:
 - outages.asset_id -> assets.asset_id
-Catatan: kolom 'mulai' & 'selesai' bertipe TIMESTAMP.
+Catatan: kolom 'mulai' & 'selesai' bertipe TIMESTAMP/DATETIME.
          durasi_menit = lama gangguan dalam menit."""
 
 
 # ── TODO 2 — System prompt (schema injection) ───────────────────────
 def build_prompt(question: str) -> str:
-    prompt = f"""Anda adalah ahli SQL PostgreSQL. Berikut skema database:
+    prompt = f"""Anda adalah ahli SQL untuk SQLite. Berikut skema database:
 
 {SCHEMA_STR}
 
-Tugas Anda: ubah pertanyaan berbahasa natural di bawah menjadi SATU query PostgreSQL SELECT.
+Tugas Anda: ubah pertanyaan berbahasa natural di bawah menjadi SATU query SQLite SELECT.
 
 Aturan ketat:
 - Balas HANYA dengan query SQL, tanpa penjelasan, tanpa markdown, tanpa ```sql```.
 - Hanya gunakan tabel & kolom yang ada di skema di atas.
 - Gunakan JOIN antara assets dan outages bila pertanyaan butuh data dari kedua tabel.
 - Jangan gunakan DROP, DELETE, UPDATE, INSERT, ALTER, atau perintah pengubah data lainnya.
-- Kolom 'mulai' dan 'selesai' bertipe TIMESTAMP. Jika pertanyaan menyebut periode waktu relatif
-  (mis. "bulan ini", "tahun ini"), gunakan date_trunc('month', mulai) = date_trunc('month', CURRENT_DATE)
-  atau EXTRACT(...) langsung pada kolom tersebut tanpa perlu CAST tambahan.
+- Ini SQLite, BUKAN PostgreSQL. Jangan pakai date_trunc() atau EXTRACT() (tidak ada di SQLite).
+- Untuk filter periode waktu relatif pada kolom 'mulai' atau 'selesai', gunakan fungsi SQLite
+  strftime(), misalnya:
+  strftime('%Y-%m', mulai) = strftime('%Y-%m', 'now')   -- filter bulan ini
+  strftime('%Y', mulai) = strftime('%Y', 'now')          -- filter tahun ini
 
 Contoh:
 Pertanyaan: Berapa total gangguan untuk setiap aset?
 SQL: SELECT a.nama, COUNT(o.outage_id) AS jumlah_gangguan FROM assets a JOIN outages o ON a.asset_id = o.asset_id GROUP BY a.nama ORDER BY jumlah_gangguan DESC
 
 Pertanyaan: Berapa jumlah gangguan bulan ini?
-SQL: SELECT COUNT(*) AS jumlah_gangguan FROM outages WHERE date_trunc('month', mulai) = date_trunc('month', CURRENT_DATE)
+SQL: SELECT COUNT(*) AS jumlah_gangguan FROM outages WHERE strftime('%Y-%m', mulai) = strftime('%Y-%m', 'now')
 
 Pertanyaan: {question}
 SQL:"""

@@ -1,0 +1,11 @@
+asset_id,nama,jenis,lokasi
+A01,Gardu GD-Kebayoran,Gardu Distribusi,Jakarta Selatan
+A02,Gardu GD-Menteng,Gardu Distribusi,Jakarta Pusat
+A03,Trafo TR-Cawang,Transformator,Jakarta Timur
+A04,Penyulang PY-Depok-1,Penyulang,Depok
+A05,Penyulang PY-Bekasi-2,Penyulang,Bekasi
+A06,Gardu GD-Tangerang,Gardu Distribusi,Tangerang
+A07,Trafo TR-Cibubur,Transformator,Jakarta Timur
+A08,SUTM SL-Serpong,SUTM,Tangerang Selatan
+A09,Gardu GD-Cikini,Gardu Distribusi,Jakarta Pusat
+A10,Penyulang PY-Bogor-3,Penyulang,Bogor
